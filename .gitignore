@@ -4,3 +4,6 @@
 *.log
 *.csv
 *.png
+!report/figures/*.png
+!report/figures/*.csv
+__pycache__/
