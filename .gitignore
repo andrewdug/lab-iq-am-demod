@@ -7,3 +7,6 @@
 !report/figures/*.png
 !report/figures/*.csv
 __pycache__/
+slprj/
+*.slxc
+*.asv
