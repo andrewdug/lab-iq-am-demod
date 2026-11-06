@@ -28,7 +28,14 @@ variants = struct( ...
     'order', {10, 10, 18});
 iMain = 3;                          % вариант для графиков (итоговый фильтр после выбора порядка)
 
-%% Чтение результатов Qucs-S
+%% Чтение результатов Qucs-S: текущая папка, иначе ../qucs рядом со скриптом
+if ~isfile(fileDat)
+    alt = fullfile(fileparts(mfilename('fullpath')), '..', 'qucs', fileDat);
+    if isfile(alt)
+        fileDat = alt;
+    end
+end
+fprintf('Данные: %s\n', fileDat);
 ds = readQucsDat(fileDat);
 t  = ds('time');
 s  = ds('x0.Vt');

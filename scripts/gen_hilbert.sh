@@ -12,27 +12,67 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 comps=$tmp/comps; wires=$tmp/wires; diags=$tmp/diags
 : > "$comps"; : > "$wires"; : > "$diags"
 
-lbl() { echo "  <$1 $2 $1 $2 \"$3\" $(( $1 + 10 )) $(( $2 - 30 )) 0 \"\">" >> "$wires"; }
-gnd() { echo "  <GND * 1 $1 $2 0 0 0 0>" >> "$comps"; }
-# vcvs NAME X Y G T IN OUTP OUTN   (IN/OUTP/OUTN: node label or "gnd"; in- always gnd)
-vcvs() {
-  local n=$1 x=$2 y=$3 g=$4 t=$5 in=$6 op=$7 on=$8
-  echo "  <VCVS $n 1 $x $y -26 34 0 0 \"$g\" 1 \"$t\" 1>" >> "$comps"
-  lbl $((x-30)) $((y-30)) "$in"
-  gnd $((x-30)) $((y+30))
-  if [ "$op" = gnd ]; then gnd $((x+30)) $((y-30)); else lbl $((x+30)) $((y-30)) "$op"; fi
-  if [ "$on" = gnd ]; then gnd $((x+30)) $((y+30)); else lbl $((x+30)) $((y+30)) "$on"; fi
+# Layout in the style of MicroCap ex5 (all connections are real wires; Qucs joins wires only at end points):
+#   delay line D1..D9 (Ideal/VDelay, 2Dt each) on y = 70; tap bus of node x(2j) runs down at x = 350 + 200 j;
+#   filter rows: G at y = 500 (order 18 first, so its extra taps do not cross the other rows), W at 750, H at 1000;
+#   tap j: gain block (VCVS, T = 0) at x = 400 + 200 j, adder (Ideal/VSum) A_j at (500 + 200 j, row + 70);
+#   reference delays D0 (5 Dt) and D18 (9 Dt) at the bottom, fed from the x0 bus.
+# VCVS pins: in+ (x-30, y-30), in- (x-30, y+30), out+ (x+30, y-30), out- (x+30, y+30).
+# VDelay pins: in (x-30, y), out (x+30, y).  VSum pins: in1 (x, y-30), in2 (x, y+30), out (x+30, y).
+ROWS=(500 750 1000)
+ROW_G=500
+
+# wire X1 Y1 X2 Y2 [LABEL]
+wire() {
+  local l=${5:-}
+  if [ -n "$l" ]; then
+    echo "  <$1 $2 $3 $4 \"$l\" $(( ($1 + $3) / 2 - 10 )) $(( $2 - 30 )) 0 \"\">" >> "$wires"
+  else
+    echo "  <$1 $2 $3 $4 \"\" 0 0 0 \"\">" >> "$wires"
+  fi
 }
+gnd() { echo "  <GND * 1 $1 $2 0 0 0 0>" >> "$comps"; }
+# text X Y SIZE "TEXT" - annotation (Paintings)
+text() { echo "  <Text $1 $2 $3 #00007f 0 \"$4\">" >> "$diags"; }
+# gain NAME X Y K: ideal amplifier (VCVS without delay), in- and out- grounded
+gain() {
+  echo "  <VCVS $1 1 $2 $3 -26 34 0 0 \"$4\" 1 \"0\" 0>" >> "$comps"
+  gnd $(($2 - 30)) $(($3 + 30)); gnd $(($2 + 30)) $(($3 + 30))
+}
+# delay NAME X Y TDEL: Ideal/VDelay block
+delay() { echo "  <Lib $1 1 $2 $3 -20 24 0 0 \"Ideal\" 0 \"VDelay\" 0 \"$4\" 1>" >> "$comps"; }
+# adder NAME X Y: Ideal/VSum block
+adder() { echo "  <Lib $1 1 $2 $3 22 -36 0 0 \"Ideal\" 0 \"VSum\" 0>" >> "$comps"; }
+# rload NAME X Y: vertical 1 MOhm, top pin (X, Y-30), bottom grounded
 rload() { echo "  <R $1 1 $2 $3 15 -26 0 1 \"1 MOhm\" 1 \"26.85\" 0 \"0.0\" 0 \"0.0\" 0 \"26.85\" 0 \"european\" 0>" >> "$comps"
-  lbl "$2" $(($3-30)) "$4"; gnd "$2" $(($3+30)); }
-# chain PREFIX ROW ORDER COEF NODE OUT: taps x0, x2, ..., x<ORDER>; VCVS outputs in series = summator
+  gnd "$2" $(($3 + 30)); }
+# chain PREFIX ROW ORDER COEF OUTNODE LOADNAME: taps x0, x2, ..., x<ORDER>;
+# y = K0 x0 + K1 x2 + ... accumulated by the adder chain A1 ... A<nt-1>
 chain() {
-  local p=$1 row=$2 order=$3 cf=$4 nd=$5 outn=$6 nt=$(( $3 / 2 + 1 )) j op on
+  local p=$1 row=$2 order=$3 cf=$4 outn=$5 ln=$6 nt=$(( $3 / 2 + 1 )) j x ax
+  local ay=$((row + 70)) yb=$((row + 130))
   for ((j = 0; j < nt; j++)); do
-    on=gnd; [ $j -gt 0 ] && on=$nd$j
-    op=$nd$((j + 1)); [ $j -eq $((nt - 1)) ] && op=$outn
-    vcvs "$p$j" $((400 + 200 * j)) "$row" "$cf$j" 0 "x$((2 * j))" "$op" "$on"
+    x=$((400 + 200 * j)); ax=$((x + 100))
+    gain "$p$j" $x "$row" "$cf$j"
+    wire $((x - 50)) $((row - 30)) $((x - 30)) $((row - 30))          # tap bus -> gain input
+    wire $((x + 30)) $((row - 30)) $ax $((row - 30))                   # gain output -> right
+    if [ $j -eq 0 ]; then                                              # K0 x0 -> lower input of A1
+      wire $ax $((row - 30)) $ax $yb
+      wire $ax $yb $((ax + 200)) $yb
+      wire $((ax + 200)) $yb $((ax + 200)) $((ay + 30))
+    else
+      adder "A$p$j" $ax $ay
+      wire $ax $((row - 30)) $ax $((ay - 30))                          # K_j x(2j) -> upper input of A_j
+      if [ $j -lt $((nt - 1)) ]; then                                  # A_j output -> lower input of A_(j+1)
+        wire $((ax + 30)) $ay $((ax + 30)) $yb
+        wire $((ax + 30)) $yb $((ax + 200)) $yb
+        wire $((ax + 200)) $yb $((ax + 200)) $((ay + 30))
+      fi
+    fi
   done
+  ax=$((400 + 200 * (nt - 1) + 100))
+  wire $((ax + 30)) $ay $((ax + 100)) $ay "$outn"
+  rload "$ln" $((ax + 100)) $((ay + 30))
 }
 
 # --- source ---
@@ -47,20 +87,43 @@ else
   echo '  <Vac V1 1 100 200 18 -26 0 1 "1 V" 1 "1 GHz" 0 "0" 0 "0" 0 "0" 0 "0" 0>' >> "$comps"
   gnd 100 230
 fi
-lbl 100 170 x0
+wire 100 170 100 70
 
-# --- delay line D1..D9: nine 2*Dt sections (x0 ... x18); alignment delays 5*Dt (xd) and 9*Dt (xd18) ---
-for i in 1 2 3 4 5 6 7 8 9; do vcvs D$i $((200 + 200 * i)) 100 1 T2 x$((2 * i - 2)) x$((2 * i)) gnd; done
-vcvs D0 400 300 1 T5 x0 xd gnd
-vcvs D18 800 300 1 T9 x0 xd18 gnd
+# --- delay line D1..D9: nine 2*Dt blocks, nodes x0, x2, ..., x18 = s(t - k*Dt) ---
+wire 100 70 350 70 x0
+for i in 1 2 3 4 5 6 7 8 9; do
+  x=$((200 + 200 * i))
+  delay D$i $x 70 T2
+  wire $((x - 50)) 70 $((x - 30)) 70                                   # node x(2i-2) -> in
+  wire $((x + 30)) 70 $((x + 150)) 70 "x$((2 * i))"                     # out -> node x(2i)
+done
+
+# --- tap buses: node x(2j) down to the filter rows (split at every row so the joints are wire ends) ---
+for j in 0 1 2 3 4 5 6 7 8 9; do
+  bx=$((350 + 200 * j)); y0=70
+  for row in "${ROWS[@]}"; do
+    [ $j -gt 5 ] && [ "$row" != $ROW_G ] && continue                   # orders 10 use taps j = 0..5 only
+    wire $bx $y0 $bx $((row - 30)); y0=$((row - 30))
+  done
+done
 
 # --- filters ---
-chain H 500 10 c s y
-chain W 700 10 cw sw yw
-chain G 900 18 g sg y18
-rload Ry 2400 500 y; rload Ryw 2500 500 yw; rload Ry18 2600 500 y18
-rload Rxd 2700 500 xd; rload Rxd18 2800 500 xd18
+chain G 500 18 g y18 Ry18
+chain W 750 10 cw yw Ryw
+chain H 1000 10 c y Ry
 
+# --- delay line of the source signal s'(t) (p. 5): D0 = 5 Dt -> xd, D18 = 9 Dt -> xd18 ---
+wire 350 970 350 1300; wire 350 1300 350 1420
+delay D0 450 1300 T5;  wire 350 1300 420 1300; wire 480 1300 600 1300 xd;   rload Rxd 600 1330
+delay D18 450 1420 T9; wire 350 1420 420 1420; wire 480 1420 600 1420 xd18; rload Rxd18 600 1450
+
+# --- annotations ---
+text -300 -110 14 "ЛИНИЯ ЗАДЕРЖКИ ФИЛЬТРА: D1...D9 - блоки задержки VDelay (библиотека Ideal), Tdel = T2 = 2Dt = 1,163 нс.\nУзлы x0, x2, ..., x18 - отсчёты s(t - k Dt); вертикальные шины подают их на отводы фильтров."
+text -300 430 14 "ПОРЯДОК 18, окно Хэмминга (п. 4):\nусилители G0...G9, K = g0...g9,\nсумматоры AG1...AG9 -> y18"
+text -300 680 14 "ПОРЯДОК 10, окно Хэмминга:\nусилители W0...W5, K = cw0...cw5,\nсумматоры AW1...AW5 -> yw"
+text -300 930 14 "ПОРЯДОК 10, без окна:\nусилители H0...H5, K = c0...c5,\nсумматоры AH1...AH5 -> y"
+text -300 1260 14 "ЛИНИЯ ЗАДЕРЖКИ ИСХОДНОГО\nСИГНАЛА s'(t) (п. 5):\nD0: 5Dt = 2,907 нс -> xd (к порядку 10)\nD18: 9Dt = 5,233 нс -> xd18 (к порядку 18)"
+text 800 1280 14 "Усилитель с коэффициентом K - ИНУН (VCVS) без задержки; VDelay и VSum внутри тоже ИНУН.\nR = 1 МОм - нагрузки, только для вывода напряжений y, yw, y18, xd, xd18.\nДискретизация с шагом Dt и п. 5-8 (z(n), годограф, спектры, I/Q, демодуляция):\nMATLAB-скрипт scripts/hilbert_iq.m, запускать после моделирования TR (читает LR2k5_N1_hilbert_TR.dat)."
 # order-18 Hamming coefficients: g_j = 2/(pi k) * (0.54 - 0.46 cos(2 pi n / 18)), n = 2j, k = n - 9
 geq=""
 for j in 0 1 2 3 4 5 6 7 8 9; do
@@ -69,16 +132,16 @@ done
 gnum=$(awk 'BEGIN{pi=atan2(0,-1); for(j=0;j<10;j++){n=2*j; k=n-9; printf "%s%.4f", (j?" ":""), 2/(pi*k)*(0.54-0.46*cos(2*pi*n/18))}}' | tr . ,)
 
 cat >> "$comps" <<EOF
-  <Eqn Eqn1 1 -300 -400 -37 18 0 0 "N=1" 1 "f0=(400+30*N)*1e6" 1 "Fm=3*N*1e6" 1 "U0=1" 1 "m=1" 1 "fs=4*f0" 1 "Dt=1/fs" 1 "T2=2*Dt" 1 "T5=5*Dt" 1 "T9=9*Dt" 1 "yes" 0>
-  <Eqn EqnH 1 200 -400 -37 18 0 0 "c0=-2/(5*pi)" 1 "c1=-2/(3*pi)" 1 "c2=-2/pi" 1 "c3=2/pi" 1 "c4=2/(3*pi)" 1 "c5=2/(5*pi)" 1 "w5=0.54-0.46*cos(2*pi*0/10)" 1 "w3=0.54-0.46*cos(2*pi*2/10)" 1 "w1=0.54-0.46*cos(2*pi*4/10)" 1 "cw0=c0*w5" 1 "cw1=c1*w3" 1 "cw2=c2*w1" 1 "cw3=c3*w1" 1 "cw4=c4*w3" 1 "cw5=c5*w5" 1 "yes" 0>
-  <Eqn EqnG 1 700 -400 -37 18 0 0$geq "yes" 0>
+  <Eqn Eqn1 1 -300 -750 -37 18 0 0 "N=1" 1 "f0=(400+30*N)*1e6" 1 "Fm=3*N*1e6" 1 "U0=1" 1 "m=1" 1 "fs=4*f0" 1 "Dt=1/fs" 1 "T2=2*Dt" 1 "T5=5*Dt" 1 "T9=9*Dt" 1 "yes" 0>
+  <Eqn EqnH 1 200 -750 -37 18 0 0 "c0=-2/(5*pi)" 1 "c1=-2/(3*pi)" 1 "c2=-2/pi" 1 "c3=2/pi" 1 "c4=2/(3*pi)" 1 "c5=2/(5*pi)" 1 "w5=0.54-0.46*cos(2*pi*0/10)" 1 "w3=0.54-0.46*cos(2*pi*2/10)" 1 "w1=0.54-0.46*cos(2*pi*4/10)" 1 "cw0=c0*w5" 1 "cw1=c1*w3" 1 "cw2=c2*w1" 1 "cw3=c3*w1" 1 "cw4=c4*w3" 1 "cw5=c5*w5" 1 "yes" 0>
+  <Eqn EqnG 1 700 -750 -37 18 0 0$geq "yes" 0>
 EOF
 
 if [ "$mode" = TR ]; then
   # 41281 points: step Dt/12, so the samples t = n*Dt lie exactly on the output grid
   cat >> "$comps" <<'EOF'
-  <.TR TR1 1 -300 400 0 78 0 0 "lin" 1 "0" 1 "2e-6" 1 "41281" 1 "Trapezoidal" 0 "2" 0 "1 ps" 0 "1e-16" 0 "150" 0 "0.001" 0 "1 pA" 0 "1 uV" 0 "26.85" 0 "1e-3" 0 "1e-6" 0 "1" 0 "CroutLU" 0 "no" 0 "yes" 0 "10 ps" 0>
-  <Eqn EqnE 1 1200 -400 -37 18 0 0 "Uenv=U0*(1+m*sin(2*pi*Fm*(time-T5)))" 1 "Uenv18=U0*(1+m*sin(2*pi*Fm*(time-T9)))" 1 "Ur=sqrt(xd.Vt^2+y.Vt^2)" 1 "Uw=sqrt(xd.Vt^2+yw.Vt^2)" 1 "Ug=sqrt(xd18.Vt^2+y18.Vt^2)" 1 "yes" 0>
+  <.TR TR1 1 -300 1560 0 78 0 0 "lin" 1 "0" 1 "2e-6" 1 "41281" 1 "Trapezoidal" 0 "2" 0 "1 ps" 0 "1e-16" 0 "150" 0 "0.001" 0 "1 pA" 0 "1 uV" 0 "26.85" 0 "1e-3" 0 "1e-6" 0 "1" 0 "CroutLU" 0 "no" 0 "yes" 0 "10 ps" 0>
+  <Eqn EqnE 1 1200 -750 -37 18 0 0 "Uenv=U0*(1+m*sin(2*pi*Fm*(time-T5)))" 1 "Uenv18=U0*(1+m*sin(2*pi*Fm*(time-T9)))" 1 "Ur=sqrt(xd.Vt^2+y.Vt^2)" 1 "Uw=sqrt(xd.Vt^2+yw.Vt^2)" 1 "Ug=sqrt(xd18.Vt^2+y18.Vt^2)" 1 "yes" 0>
 EOF
   cat >> "$diags" <<'EOF'
   <Rect 3000 -300 1000 300 3 #c0c0c0 1 00 1 0 1e-07 1e-06 1 -1 0.5 1 1 -1 0.5 1 315 0 225 1 0 0 "t, с" "В" "">
@@ -112,9 +175,9 @@ EOF
 EOF
 else
   cat >> "$comps" <<'EOF'
-  <.AC AC1 1 -300 400 0 78 0 0 "lin" 1 "1 MHz" 1 "860 MHz" 1 "860" 1 "no" 0>
-  <Eqn EqnA 1 1200 -400 -37 18 0 0 "Kh=mag(y.v)" 1 "Kw=mag(yw.v)" 1 "Kg=mag(y18.v)" 1 "Kd=mag(xd.v)" 1 "Fh=unwrap(angle(y.v))" 1 "Fw=unwrap(angle(yw.v))" 1 "Fg=unwrap(angle(y18.v))" 1 "Fd=unwrap(angle(xd.v))" 1 "dFh=angle(y.v/xd.v)*180/pi" 1 "dFw=angle(yw.v/xd.v)*180/pi" 1 "dFg=angle(y18.v/xd18.v)*180/pi" 1 "tgw=-diff(Fw,acfrequency)/(2*pi)" 1 "tgg=-diff(Fg,acfrequency)/(2*pi)" 1 "yes" 0>
-  <Eqn EqnF0 1 1700 -400 -37 18 0 0 "Kh_f0=Kh[429]" 1 "Kw_f0=Kw[429]" 1 "Kg_f0=Kg[429]" 1 "dKh_f0=(Kh[429]-Kd[429])*100" 1 "dKw_f0=(Kw[429]-Kd[429])*100" 1 "dKg_f0=(Kg[429]-Kd[429])*100" 1 "dFh_f0=dFh[429]" 1 "dFw_f0=dFw[429]" 1 "dFg_f0=dFg[429]" 1 "t0w_ns=tgw[429]*1e9" 1 "t0g_ns=tgg[429]*1e9" 1 "T5_ns=T5*1e9" 1 "T9_ns=T9*1e9" 1 "yes" 0>
+  <.AC AC1 1 -300 1560 0 78 0 0 "lin" 1 "1 MHz" 1 "860 MHz" 1 "860" 1 "no" 0>
+  <Eqn EqnA 1 1200 -750 -37 18 0 0 "Kh=mag(y.v)" 1 "Kw=mag(yw.v)" 1 "Kg=mag(y18.v)" 1 "Kd=mag(xd.v)" 1 "Fh=unwrap(angle(y.v))" 1 "Fw=unwrap(angle(yw.v))" 1 "Fg=unwrap(angle(y18.v))" 1 "Fd=unwrap(angle(xd.v))" 1 "dFh=angle(y.v/xd.v)*180/pi" 1 "dFw=angle(yw.v/xd.v)*180/pi" 1 "dFg=angle(y18.v/xd18.v)*180/pi" 1 "tgw=-diff(Fw,acfrequency)/(2*pi)" 1 "tgg=-diff(Fg,acfrequency)/(2*pi)" 1 "yes" 0>
+  <Eqn EqnF0 1 1700 -750 -37 18 0 0 "Kh_f0=Kh[429]" 1 "Kw_f0=Kw[429]" 1 "Kg_f0=Kg[429]" 1 "dKh_f0=(Kh[429]-Kd[429])*100" 1 "dKw_f0=(Kw[429]-Kd[429])*100" 1 "dKg_f0=(Kg[429]-Kd[429])*100" 1 "dFh_f0=dFh[429]" 1 "dFw_f0=dFw[429]" 1 "dFg_f0=dFg[429]" 1 "t0w_ns=tgw[429]*1e9" 1 "t0g_ns=tgg[429]*1e9" 1 "T5_ns=T5*1e9" 1 "T9_ns=T9*1e9" 1 "yes" 0>
 EOF
   cat >> "$diags" <<'EOF'
   <Rect 3000 -300 1000 350 3 #c0c0c0 1 00 0 0 1e+08 8.6e+08 0 0 0.2 1.4 1 -1 0.5 1 315 0 225 1 0 0 "Частота, Гц" "|K|" "">
@@ -161,14 +224,14 @@ EOF
 EOF
 fi
 cat >> "$diags" <<EOF
-  <Text -300 -650 14 #00007f 0 "Цифровые КИХ-фильтры Гильберта (аналог модели MicroCap ex5), N = 1:\nfs = 4 f0 = 1720 МГц (f0 - в середине области равномерности АЧХ), Dt = 1/fs = 0,5814 нс; линия задержки 9 x 2Dt.\nПорядок 10 (11 коэфф., n0 = 6): h[k] = 2/(pi k), k = -5..5 нечётные: -0,1273 -0,2122 -0,6366 0 0,6366 0,2122 0,1273; задержка t0 = 5Dt = 2,907 нс.\nОкно Хэмминга w[n] = 0,54 - 0,46 cos(2 pi n/(N-1)), N = 11: 0,08 0,398 0,912 1 0,912 0,398 0,08.\nПорядок 18 (19 коэфф., n0 = 10) с окном Хэмминга, k = -9..9 нечётные: $gnum; t0 = 9Dt = 5,233 нс.\nСумматор - выходы ИНУН, включённые последовательно.">
+  <Text -300 -980 14 #00007f 0 "Цифровые КИХ-фильтры Гильберта (аналог модели MicroCap ex5), N = 1:\nfs = 4 f0 = 1720 МГц (f0 - в середине области равномерности АЧХ), Dt = 1/fs = 0,5814 нс; линия задержки 9 x 2Dt.\nПорядок 10 (11 коэфф., n0 = 6): h[k] = 2/(pi k), k = -5..5 нечётные: -0,1273 -0,2122 -0,6366 0 0,6366 0,2122 0,1273; задержка t0 = 5Dt = 2,907 нс.\nОкно Хэмминга w[n] = 0,54 - 0,46 cos(2 pi n/(N-1)), N = 11: 0,08 0,398 0,912 1 0,912 0,398 0,08.\nПорядок 18 (19 коэфф., n0 = 10) с окном Хэмминга, k = -9..9 нечётные: $gnum; t0 = 9Dt = 5,233 нс.\nЗадержки - блоки VDelay, умножение на коэффициент - ИНУН, сложение - цепочка VSum.">
 EOF
 
 {
 cat <<EOF
 <Qucs Schematic 25.2.99>
 <Properties>
-  <View=-400,-700,4100,2200,0.5,0,0>
+  <View=-400,-1000,4100,2200,0.5,0,0>
   <Grid=10,10,1>
   <DataSet=$name.dat>
   <DataDisplay=$name.dpl>
