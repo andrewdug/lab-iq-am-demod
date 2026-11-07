@@ -1,0 +1,5 @@
+# Qucs-S simulation datasets and temporary files
+*.dat
+*.net
+*.log
+*.bak
