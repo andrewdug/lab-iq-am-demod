@@ -111,16 +111,13 @@ for v = 1 : numel(R)
         r.t0Meas * 1e9, r.K, r.dPhi, r.imgZ, r.imgIQ, r.errU);
 end
 
-%% Сравнение всех фильтров на одной странице
-plotCompare(R, sn, tn, iAn, fAn, fa, fs, tAn, tSkip, outName);
-
-%% Подробные графики для итогового фильтра
+%% Графики: на каждом - все фильтры для сравнения
 % plotSignals(t, ds, M, tn, Dt, outName);
-plotHodograph(M, tn, tAn, sprintf('f_д = %.4g МГц: фаза меняется на %+d° за отсчёт', fs / 1e6, ...
+plotHodograph(R, tn, tAn, sprintf('f_д = %.4g МГц: фаза меняется на %+d° за отсчёт', fs / 1e6, ...
     round(mod(360 * f0 * Dt + 180, 360) - 180)), outName);
-plotSpectra(sn(iAn), M, iAn, fAn, fa, fs, outName);
-plotIQ(M, tn, iAn, fAn, Fm, outName);
-plotDemod(M, tn, tSkip, outName);
+plotSpectra(sn(iAn), R, iAn, fAn, fa, fs, outName);
+plotIQ(R, tn, iAn, fAn, Fm, outName);
+plotDemod(R, tn, tSkip, outName);
 
 fid = fopen([outName '.csv'], 'w');
 if fid < 0
@@ -137,7 +134,7 @@ end
 fprintf(fid, '%s\n', strjoin(hdr, ';'));
 fprintf(fid, [strjoin(repmat({'%.6e'}, 1, size(dat, 2)), ';') '\n'], dat.');
 fclose(fid);
-fprintf('Сохранено: %s_compare.png (все фильтры), %s_*.png (%s), %s.csv\n', outName, outName, M.V.name, outName);
+fprintf('Сохранено: %s_{hodograph,spectra,iq,demod}.png, %s.csv\n', outName, outName);
 
 %% ---------- обработка ----------
 function Hs = idealHilbert(t, s)
@@ -217,143 +214,120 @@ end
 %     saveas(fig, [outName '_signals.png']);
 % end
 
-function plotCompare(R, sn, tn, iAn, fAn, fa, fs, tAn, tSkip, outName)
-    % Одна страница: столбец на фильтр; строки - годограф z(n), спектр z(n), I(n) и Q(n), U(n);
-    % внизу - ошибка демодуляции U(n) - Uenv(n) всех фильтров на общем графике.
+function c = filtColors(n)
+    c = [0 .45 .74; .85 .33 .10; .47 .67 .19; .49 .18 .56];
+    c = c(1 + mod(0 : n - 1, size(c, 1)), :);
+end
+
+function plotHodograph(R, tn, tAn, subtitle, outName)
+    % годографы z(n) всех фильтров рядом, в одном масштабе
     nV  = numel(R);
-    fig = figure('Name', 'Сравнение фильтров Гильберта', 'Position', [40 40 520 * nV + 200 1250], 'Color', 'w');
+    fig = figure('Name', 'Годограф z(n)', 'Position', [100 100 420 * nV + 100 520], 'Color', 'w');
     kn  = tn >= tAn(1) & tn < tAn(2);
     a   = linspace(0, 2 * pi, 361);
-    cols = lines(max(nV, 1));
-    Ss  = spectrum(sn(iAn));
-    lim = [0, 0];                            % общий масштаб I/Q для сравнения
+    c   = filtColors(nV);
+    for v = 1 : nV
+        r = R(v);
+        subplot(1, nV, v);
+        plot(real(r.z(kn)), imag(r.z(kn)), '.', 'Color', c(v, :), 'MarkerSize', 8); hold on;
+        plot(2 * cos(a), 2 * sin(a), 'k:');
+        axis equal; grid on; xlim([-2.4 2.4]); ylim([-2.4 2.4]);
+        xlabel('s''(n), В'); ylabel('ŝ(n), В');
+        title({r.name, sprintf('|K(f_0)| = %.4f, \\Delta\\phi = %.1f°', r.K, r.dPhi)});
+    end
+    addSuperTitle({'Годограф аналитического сигнала z(n) = s''(n) + j ŝ(n); пунктир - |z| = U_0(1 + m)', subtitle});
+    saveas(fig, [outName '_hodograph.png']);
+end
+
+function plotSpectra(sAn, R, iAn, fAn, fa, fs, outName)
+    % вверху спектр s(n), ниже спектры z(n) всех фильтров
+    % fa - частота несущей после дискретизации: f0 = fs/4 без субдискретизации, иначе её образ +-fs/4
+    nV  = numel(R);
+    fig = figure('Name', 'Спектры s и z', 'Position', [100 50 950 230 * (nV + 1)], 'Color', 'w');
+    c   = filtColors(nV);
+    Ss  = spectrum(sAn);
+    subplot(nV + 1, 1, 1);
+    stem(fAn / 1e6, db(Ss / max(Ss)), 'BaseValue', -100, 'Marker', 'none', 'Color', [0 .6 0]);
+    grid on; ylim([-100 5]); xlim([-1.1 1.1] * fs / 2e6); ylabel('дБ');
+    title(sprintf('Амплитудный спектр s(n): несущая на \\pm%.4g МГц и боковые \\pmF_м', abs(fa) / 1e6));
+    for v = 1 : nV
+        Sz = spectrum(R(v).z(iAn));
+        subplot(nV + 1, 1, v + 1);
+        stem(fAn / 1e6, db(Sz / max(Sz)), 'BaseValue', -100, 'Marker', 'none', 'Color', c(v, :));
+        grid on; ylim([-100 5]); xlim([-1.1 1.1] * fs / 2e6); ylabel('дБ');
+        title(sprintf('Спектр z(n), %s: несущая на %+.4g МГц, зеркальная подавлена на %.1f дБ', ...
+            R(v).name, fa / 1e6, -R(v).imgZ));
+    end
+    xlabel('f, МГц');
+    saveas(fig, [outName '_spectra.png']);
+end
+
+function plotIQ(R, tn, iAn, fAn, Fm, outName)
+    % строка на фильтр: слева осциллограммы I(n), Q(n), справа их спектры
+    nV  = numel(R);
+    fig = figure('Name', 'НЧ квадратуры I, Q', 'Position', [100 50 1300 260 * nV], 'Color', 'w');
+    lim = [0, 0];                            % общий масштаб по вертикали
     for v = 1 : nV
         lim = [min(lim(1), min([R(v).I; R(v).Q])), max(lim(2), max([R(v).I; R(v).Q]))];
     end
     for v = 1 : nV
         r = R(v);
-        % 1. годограф
-        subplot(5, nV, v);
-        plot(real(r.z(kn)), imag(r.z(kn)), '.', 'Color', cols(v, :), 'MarkerSize', 5); hold on;
-        plot(2 * cos(a), 2 * sin(a), 'k:');
-        axis equal; grid on; xlim([-2.3 2.3]); ylim([-2.3 2.3]);
-        xlabel('s''(n), В'); ylabel('ŝ(n), В');
-        title({r.name, sprintf('|K(f_0)| = %.4f, \\Delta\\phi = %.1f°, t_0 = %.3f нс', r.K, r.dPhi, r.t0Meas * 1e9)});
-        % 2. спектр аналитического сигнала (серым - спектр s(n))
-        subplot(5, nV, nV + v);
-        Sz  = spectrum(r.z(iAn));
-        ref = max(Sz);
-        stem(fAn / 1e6, db(Ss / ref), 'BaseValue', -100, 'Marker', 'none', 'Color', [.75 .75 .75]); hold on;
-        stem(fAn / 1e6, db(Sz / ref), 'BaseValue', -100, 'Marker', 'none', 'Color', cols(v, :));
-        grid on; ylim([-100 5]); xlim([-1.1 1.1] * fs / 2e6);
-        xlabel('f, МГц'); ylabel('дБ');
-        title(sprintf('Спектр z(n): зеркальная (%+.4g МГц) подавлена на %.1f дБ', -fa / 1e6, -r.imgZ));
-        if v == 1
-            legend('s(n)', 'z(n)', 'Location', 'southwest');
-        end
-        % 3. НЧ квадратуры
-        subplot(5, nV, 2 * nV + v);
+        subplot(nV, 2, 2 * v - 1);
         plot(tn * 1e6, r.I, 'r', tn * 1e6, r.Q, 'b');
-        grid on; xlim([0 tn(end) * 1e6]); ylim(lim + [-0.1 0.1]);
-        xlabel('t, мкс'); ylabel('U, В');
-        title(sprintf('I(n), Q(n): max|Q| = %.2g В, образ на f_д/2: %.1f дБ', max(abs(r.Q(iAn))), r.imgIQ));
-        if v == 1
-            legend('I(n)', 'Q(n)', 'Location', 'southwest');
-        end
-        % 4. демодуляция
-        subplot(5, nV, 3 * nV + v);
-        plot(tn * 1e6, r.Uenv, 'k--', 'LineWidth', 1.1); hold on;
-        plot(tn * 1e6, r.U, 'Color', cols(v, :));
-        grid on; xlim([0 tn(end) * 1e6]); ylim([0 2.4]);
-        xlabel('t, мкс'); ylabel('U, В');
-        title(sprintf('U(n) = sqrt(I^2 + Q^2): СКО от модулирующего %.2f %%', r.errU));
-        if v == 1
-            legend('модулирующее', 'U(n)', 'Location', 'southwest');
-        end
+        grid on; ylabel('U, В'); xlim([0 tn(end) * 1e6]); ylim(lim + [-0.1 0.1]);
+        title(sprintf('I(n), Q(n), %s', r.name));
+        legend('I(n)', 'Q(n)', 'Location', 'eastoutside');
+        subplot(nV, 2, 2 * v);
+        SI = spectrum(r.I(iAn)); SQ = spectrum(r.Q(iAn)); ref = max([SI; SQ]);
+        stem(fAn / 1e6, db(SI / ref), 'BaseValue', -100, 'Marker', 'none', 'Color', 'r'); hold on;
+        stem(fAn / 1e6, db(SQ / ref), 'BaseValue', -100, 'Marker', 'none', 'Color', 'b');
+        grid on; ylim([-100 5]); ylabel('дБ');
+        title(sprintf('Спектры I, Q: 0, \\pm%g МГц; max|Q| = %.1g В; на \\pmf_д/2: %.1f дБ', ...
+            Fm / 1e6, max(abs(r.Q(iAn))), r.imgIQ));
+        legend('|I(f)|', '|Q(f)|', 'Location', 'eastoutside');
     end
-    % 5. ошибка демодуляции всех фильтров на одном графике
-    subplot(5, 1, 5);
-    names = cell(1, nV);
+    subplot(nV, 2, 2 * nV - 1); xlabel('t, мкс');
+    subplot(nV, 2, 2 * nV);     xlabel('f, МГц');
+    saveas(fig, [outName '_iq.png']);
+end
+
+function plotDemod(R, tn, tSkip, outName)
+    % строка на фильтр: U(n) и модулирующее; внизу - ошибка демодуляции всех фильтров вместе
+    nV  = numel(R);
+    fig = figure('Name', 'АМ-демодуляция', 'Position', [100 50 1100 220 * (nV + 1)], 'Color', 'w');
+    c   = filtColors(nV);
+    for v = 1 : nV
+        r = R(v);
+        subplot(nV + 1, 1, v);
+        plot(tn * 1e6, r.Uenv, 'k--', 'LineWidth', 1.2); hold on;
+        plot(tn * 1e6, r.U, 'Color', c(v, :));
+        grid on; ylabel('U, В'); xlim([0 tn(end) * 1e6]); ylim([0 2.4]);
+        title(sprintf('U(n) = sqrt(I^2 + Q^2), %s: СКО от модулирующего %.2f %%', r.name, r.errU));
+        legend('U_0(1 + m sin 2\piF_м(t - t_0))', 'U(n)', 'Location', 'eastoutside');
+    end
+    subplot(nV + 1, 1, nV + 1);
     ok = tn >= tSkip;
     eMax = 0;
+    names = cell(1, nV);
     for v = 1 : nV
         e = R(v).U - R(v).Uenv;
-        plot(tn * 1e6, e, 'Color', cols(v, :)); hold on;
+        plot(tn * 1e6, e, 'Color', c(v, :)); hold on;
         eMax = max(eMax, max(abs(e(ok))));
-        names{v} = sprintf('%s: СКО %.2f %%', R(v).name, R(v).errU);
+        names{v} = R(v).name;
     end
     yl = 1.15 * eMax * [-1 1];               % масштаб по установившемуся режиму
     plot(tSkip * 1e6 * [1 1], yl, 'k:');
     grid on; xlim([0 tn(end) * 1e6]); ylim(yl);
-    xlabel('t, мкс'); ylabel('U - U_{мод}, В');
-    title('Сравнение: ошибка демодуляции U(n) - U_0(1 + m sin 2\piF_м(t - t_0))');
-    legend([names, {'заполнение линии задержки'}], 'Location', 'eastoutside');
-    if exist('sgtitle', 'file') || exist('sgtitle', 'builtin')
-        sgtitle(sprintf('Сравнение фильтров Гильберта, f_д = %.4g МГц', fs / 1e6), 'FontWeight', 'bold');
-    end
-    saveas(fig, [outName '_compare.png']);
-end
-
-function plotHodograph(M, tn, tAn, subtitle, outName)
-    fig = newFig('Годограф z(n)');
-    kn = tn >= tAn(1) & tn < tAn(2);
-    plot(real(M.z(kn)), imag(M.z(kn)), 'b.', 'MarkerSize', 8); hold on;
-    a = linspace(0, 2 * pi, 361);
-    plot(2 * cos(a), 2 * sin(a), 'k:');
-    axis equal; grid on; xlabel('s''(n), В'); ylabel('ŝ(n), В');
-    title({'Годограф аналитического сигнала z(n) = s''(n) + j ŝ(n)', ...
-           subtitle});
-    legend('z(n)', '|z| = U_0(1 + m)', 'Location', 'eastoutside');
-    saveas(fig, [outName '_hodograph.png']);
-end
-
-function plotSpectra(sAn, M, iAn, fAn, fa, fs, outName)
-    % fa - частота несущей после дискретизации: f0 = fs/4 без субдискретизации, иначе её образ +-fs/4
-    fig = newFig('Спектры s и z');
-    Ss = spectrum(sAn);
-    Sz = spectrum(M.z(iAn));
-    ref = max(Sz);
-    subplot(2, 1, 1);
-    stem(fAn / 1e6, db(Ss / ref), 'BaseValue', -100, 'Marker', 'none', 'Color', [0 .6 0]);
-    grid on; ylim([-100 5]); xlim([-1.1 1.1] * fs / 2e6);
-    xlabel('f, МГц'); ylabel('дБ');
-    title(sprintf('Амплитудный спектр s(n): несущая на \\pm%.4g МГц и боковые \\pmF_м', abs(fa) / 1e6));
-    subplot(2, 1, 2);
-    stem(fAn / 1e6, db(Sz / ref), 'BaseValue', -100, 'Marker', 'none', 'Color', 'b');
-    grid on; ylim([-100 5]); xlim([-1.1 1.1] * fs / 2e6);
-    xlabel('f, МГц'); ylabel('дБ');
-    title(sprintf('Спектр аналитического сигнала z(n): несущая на %+.4g МГц, зеркальная подавлена на %.1f дБ', ...
-        fa / 1e6, -db(at(Sz, fAn, -fa) / at(Sz, fAn, fa))));
-    saveas(fig, [outName '_spectra.png']);
-end
-
-function plotIQ(M, tn, iAn, fAn, Fm, outName)
-    fig = newFig('НЧ квадратуры I, Q');
-    subplot(2, 1, 1);
-    plot(tn * 1e6, M.I, 'r', tn * 1e6, M.Q, 'b');
-    grid on; xlabel('t, мкс'); ylabel('U, В'); xlim([0 tn(end) * 1e6]);
-    title('Осциллограммы НЧ квадратурных составляющих I(n), Q(n)');
-    legend('I(n)', 'Q(n)', 'Location', 'eastoutside');
-    subplot(2, 1, 2);
-    SI = spectrum(M.I(iAn)); SQ = spectrum(M.Q(iAn)); ref = max([SI; SQ]);
-    stem(fAn / 1e6, db(SI / ref), 'BaseValue', -100, 'Marker', 'none', 'Color', 'r'); hold on;
-    stem(fAn / 1e6, db(SQ / ref), 'BaseValue', -100, 'Marker', 'none', 'Color', 'b');
-    grid on; ylim([-100 5]); xlabel('f, МГц'); ylabel('дБ');
-    title(sprintf('Спектры I и Q: составляющие 0, \\pm%g МГц; max|Q(n)| = %.1g В; на \\pmf_д/2 - след |K(f_0)| \\neq 1', ...
-        Fm / 1e6, max(abs(M.Q(iAn)))));
-    legend('|I(f)|', '|Q(f)|', 'Location', 'eastoutside');
-    saveas(fig, [outName '_iq.png']);
-end
-
-function plotDemod(M, tn, tSkip, outName)
-    fig = newFig('АМ-демодуляция');
-    plot(tn * 1e6, M.Uenv, 'k--', 'LineWidth', 1.2); hold on;
-    plot(tn * 1e6, M.U, 'm');
-    xline(tSkip * 1e6, ':', 'заполнение');
-    grid on; xlabel('t, мкс'); ylabel('U, В'); xlim([0 tn(end) * 1e6]);
-    title(sprintf('Огибающая U(n) = sqrt(I^2 + Q^2) и модулирующее U_0(1 + m sin 2\\piF_м(t - t_0)), %s', M.V.name));
-    legend('модулирующее', 'U(n)', 'Location', 'eastoutside');
+    xlabel('t, мкс'); ylabel('\DeltaU, В');
+    title('Ошибка демодуляции U(n) - U_0(1 + m sin 2\piF_м(t - t_0)) всех фильтров');
+    legend([names, {'заполнение'}], 'Location', 'eastoutside');
     saveas(fig, [outName '_demod.png']);
+end
+
+function addSuperTitle(txt)
+    if exist('sgtitle', 'file') || exist('sgtitle', 'builtin')
+        sgtitle(txt);
+    end
 end
 
 %% ---------- чтение .dat Qucs ----------
