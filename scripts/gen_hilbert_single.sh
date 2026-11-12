@@ -3,11 +3,17 @@
 #   delay line of 2Dt blocks (Ideal/VDelay), coefficient gains on the taps (VCVS, T = 0),
 #   two group adders (like X4, X12 in ex5; Ideal/VSum chains) and a final adder (like X7),
 #   alignment delay X1 = t0 = (n0 - 1) Dt of the source signal (not part of the filter).
-# Usage: gen_hilbert_single.sh <AC|TR> <R10|W10|W18> <out.sch>
+# Usage: gen_hilbert_single.sh <AC|TR> <R10|W10|W18> <out.sch> [DIV]
 #   R10 - order 10, rectangular window; W10 - order 10, Hamming; W18 - order 18, Hamming.
+#   DIV - undersampling (bandpass sampling) divisor, odd: fs = 4 f0 / DIV (default 1: fs = 4 f0).
+#         The carrier aliases to +fs/4 for DIV = 4k+1 and to -fs/4 for DIV = 4k+3 (inverted spectrum:
+#         the coefficients change sign so that z = s' + j s^ stays the analytic signal).
 set -euo pipefail
 mode=${1:?mode AC|TR}; filt=${2:?filter R10|W10|W18}; out=${3:?output .sch}; name=$(basename "$out" .sch)
+div=${4:-1}
 case $mode in AC|TR) ;; *) echo "mode must be AC or TR" >&2; exit 1;; esac
+if ! [[ $div =~ ^[0-9]+$ ]] || [ $((div % 2)) -ne 1 ]; then echo "DIV must be an odd positive integer" >&2; exit 1; fi
+inv=0; [ $((div % 4)) -eq 3 ] && inv=1
 case $filt in
   R10) L=10; win=0; title="порядок 10, без окна (прямоугольное окно)";;
   W10) L=10; win=1; title="порядок 10, окно Хэмминга";;
@@ -100,15 +106,30 @@ ceq=""; cnum=""
 for ((j = 0; j < nt; j++)); do
   k=$((2 * j - d0))
   if [ $win = 1 ]; then expr="2/(pi*($k))*(0.54-0.46*cos(2*pi*$((2 * j))/$L))"; else expr="2/(pi*($k))"; fi
+  [ $inv = 1 ] && expr="-$expr"
   ceq="$ceq \"c$j=$expr\" 1"
-  cnum="$cnum$(awk -v k=$k -v n=$((2 * j)) -v L=$L -v w=$win 'BEGIN{pi=atan2(0,-1); c=2/(pi*k); if(w) c*=0.54-0.46*cos(2*pi*n/L); printf "%s%.4f", (n?" ":""), c}')"
+  cnum="$cnum$(awk -v k=$k -v n=$((2 * j)) -v L=$L -v w=$win -v s=$((1 - 2 * inv)) 'BEGIN{pi=atan2(0,-1); c=s*2/(pi*k); if(w) c*=0.54-0.46*cos(2*pi*n/L); printf "%s%.4f", (n?" ":""), c}')"
 done
 cnum=$(echo "$cnum" | tr . ,)
+fsx="4*f0"; [ $div -ne 1 ] && fsx="4*f0/$div"
 
 cat >> "$comps" <<EOF
-  <Eqn Eqn1 1 -300 -600 -37 18 0 0 "N=1" 1 "f0=(400+30*N)*1e6" 1 "Fm=3*N*1e6" 1 "U0=1" 1 "m=1" 1 "fs=4*f0" 1 "Dt=1/fs" 1 "T2=2*Dt" 1 "T0=$d0*Dt" 1 "yes" 0>
+  <Eqn Eqn1 1 -300 -600 -37 18 0 0 "N=1" 1 "f0=(400+30*N)*1e6" 1 "Fm=3*N*1e6" 1 "U0=1" 1 "m=1" 1 "fs=$fsx" 1 "Dt=1/fs" 1 "T2=2*Dt" 1 "T0=$d0*Dt" 1 "yes" 0>
   <Eqn EqnC 1 300 -600 -37 18 0 0$ceq "yes" 0>
 EOF
+# numbers for the annotations (N = 1)
+fsM=$(awk -v d=$div 'BEGIN{printf "%.4g", 1720/d}' | tr . ,)
+dtN=$(awk -v d=$div 'BEGIN{printf "%.4g", d/1.72}' | tr . ,)
+t0N=$(awk -v d=$div -v n=$d0 'BEGIN{printf "%.4g", n*d/1.72}' | tr . ,)
+faM=$(awk -v d=$div 'BEGIN{printf "%.4g", 430/d}' | tr . ,)
+zone=$(( (2 * 430 * div) / 1720 + 1 ))
+acNote="f0 = fs/4 = 430 МГц"
+head1="N = 1: fs = 4 f0 = 1720 МГц, Dt = 0,5814 нс."
+if [ $div -ne 1 ]; then
+  sgn="+"; [ $inv = 1 ] && sgn="-"
+  acNote="субдискретизация fs = 4f0/$div = $fsM МГц: АЧХ периодична с периодом fs, f0 = 430 МГц попадает в точку ${sgn}fs/4"
+  head1="СУБДИСКРЕТИЗАЦИЯ (полосовая дискретизация), N = 1: fs = 4 f0/$div = $fsM МГц, Dt = $dtN нс; f0 = 430 МГц - зона Найквиста №$zone, после дискретизации несущая на ${sgn}fs/4 = ${sgn}$faM МГц.$( [ $inv = 1 ] && echo ' Спектр инвертирован, поэтому знаки коэффициентов изменены.' )\nПеред реальным АЦП нужен полосовой фильтр 427...433 МГц (в модели сигнал чистый); ширина полосы входа АЦП > 433 МГц."
+fi
 
 xr=$((fx + 400))
 if [ "$mode" = TR ]; then
@@ -116,6 +137,30 @@ if [ "$mode" = TR ]; then
   <.TR TR1 1 -300 900 0 78 0 0 "lin" 1 "0" 1 "2e-6" 1 "41281" 1 "Trapezoidal" 0 "2" 0 "1 ps" 0 "1e-16" 0 "150" 0 "0.001" 0 "1 pA" 0 "1 uV" 0 "26.85" 0 "1e-3" 0 "1e-6" 0 "1" 0 "CroutLU" 0 "no" 0 "yes" 0 "10 ps" 0>
   <Eqn EqnE 1 900 -600 -37 18 0 0 "Uenv=U0*(1+m*sin(2*pi*Fm*(time-T0)))" 1 "Uz=sqrt(xd.Vt^2+y.Vt^2)" 1 "yes" 0>
 EOF
+fi
+if [ "$mode" = TR ] && [ $div -ne 1 ]; then
+  # undersampling: ADC samples s(n) = s((n-1) Dt), Dt = DIV/(4 f0); show them over the continuous signals
+  cat >> "$comps" <<'EOF'
+  <Eqn EqnS 1 1500 -600 -37 18 0 0 "Ns=round(max(time)/Dt)+1" 1 "tn=interpolate(time,time,Ns)" 1 "sn=interpolate(x0.Vt,time,Ns)" 1 "sdn=interpolate(xd.Vt,time,Ns)" 1 "shn=interpolate(y.Vt,time,Ns)" 1 "Un=sqrt(sdn^2+shn^2)" 1 "Umodn=U0*(1+m*sin(2*pi*Fm*(tn-T0)))" 1 "yes" 0>
+EOF
+  cat >> "$diags" <<EOF
+  <Rect $xr -300 1000 300 3 #c0c0c0 1 00 1 0 1e-07 1e-06 1 -1 0.5 1 1 -1 0.5 1 315 0 225 1 0 0 "t, с" "В" "">
+	<"x0.Vt" #008000 0 3 0 0 0>
+	<"sn" #ff0000 2 3 0 4 0>
+  </Rect>
+  <Rect $xr 200 1000 300 3 #c0c0c0 1 00 0 1e-06 5e-08 1.3e-06 1 -1 0.5 1 1 -1 0.5 1 315 0 225 1 0 0 "t, с" "В" "">
+	<"sdn" #000000 1 3 0 0 0>
+	<"shn" #0000ff 1 3 0 0 0>
+  </Rect>
+  <Rect $xr 700 1000 300 3 #c0c0c0 1 00 1 0 1e-07 1e-06 1 -1 0.5 1 1 -1 0.5 1 315 0 225 1 0 0 "t, с" "В" "">
+	<"Umodn" #000000 2 3 0 1 0>
+	<"Un" #ff00ff 1 3 0 0 0>
+  </Rect>
+  <Text $xr -380 14 #00007f 0 "Входной АМ-сигнал s(t) = x0 (зелёный) и отсчёты АЦП s(n) с шагом Dt = $dtN нс (красные звёздочки)">
+  <Text $xr 120 14 #00007f 0 "Отсчёты s'(n) = s(n - t0) (чёрный) и s^(n) (синий): несущая 430 МГц после дискретизации видна как $faM МГц, сдвиг 90°">
+  <Text $xr 620 14 #00007f 0 "Огибающая по отсчётам U(n) = sqrt(s'(n)^2 + s^(n)^2) (фиолетовый) и модулирующее (чёрный пунктир)">
+EOF
+elif [ "$mode" = TR ]; then
   cat >> "$diags" <<EOF
   <Rect $xr -300 1000 300 3 #c0c0c0 1 00 1 0 1e-07 1e-06 1 -1 0.5 1 1 -1 0.5 1 315 0 225 1 0 0 "t, с" "В" "">
 	<"x0.Vt" #008000 0 3 0 0 0>
@@ -133,7 +178,8 @@ EOF
   <Text $xr 120 14 #00007f 0 "s(t) (зелёный), s'(t) = s(t - t0) = xd (чёрный), сопряжённый по Гильберту s^(t) = y (синий)">
   <Text $xr 620 14 #00007f 0 "Огибающая sqrt(xd^2 + y^2) (синий) и модулирующее U0(1 + m sin 2pi Fм (t - t0)) (чёрный пунктир)">
 EOF
-else
+fi
+if [ "$mode" = AC ]; then
   cat >> "$comps" <<'EOF'
   <.AC AC1 1 -300 900 0 78 0 0 "lin" 1 "1 MHz" 1 "860 MHz" 1 "860" 1 "no" 0>
   <Eqn EqnA 1 900 -600 -37 18 0 0 "K=mag(y.v)" 1 "Kd=mag(xd.v)" 1 "F=unwrap(angle(y.v))" 1 "Fd=unwrap(angle(xd.v))" 1 "dF=angle(y.v/xd.v)*180/pi" 1 "tg=-diff(F,acfrequency)/(2*pi)" 1 "K_f0=K[429]" 1 "dK_f0=(K[429]-Kd[429])*100" 1 "dF_f0=dF[429]" 1 "t0_ns=tg[429]*1e9" 1 "T0_ns=T0*1e9" 1 "yes" 0>
@@ -157,14 +203,14 @@ EOF
 	<"t0_ns" #0000ff 0 4 0 0 0>
 	<"T0_ns" #0000ff 0 4 0 0 0>
   </Tab>
-  <Text $xr -380 14 #00007f 0 "АЧХ фильтра (синий) и элемента задержки X0 = t0 (чёрный пунктир); f0 = fs/4 = 430 МГц">
+  <Text $xr -380 14 #00007f 0 "АЧХ фильтра (синий) и элемента задержки X0 = t0 (чёрный пунктир); $acNote">
   <Text $xr 170 14 #00007f 0 "ФЧХ (развёрнутая), рад: фильтр (синий), элемент задержки (чёрный пунктир)">
   <Text $xr 720 14 #00007f 0 "Разность фаз выхода фильтра и элемента задержки X0, град">
   <Text $xr 1220 14 #00007f 0 "На f0 = 430 МГц: |K|, отклонение от задержки (%), разность фаз (град), задержка по ФЧХ и теоретическая (нс)">
 EOF
 fi
 
-text -300 -900 14 "Цифровой КИХ-фильтр Гильберта, $title (N = $((L + 1)), n0 = $n0), по образцу MicroCap ex5. N = 1: fs = 4 f0 = 1720 МГц, Dt = 0,5814 нс.\nКоэффициенты h(n) = 2/(pi (n - n0)) при нечётном n - n0$( [ $win = 1 ] && echo ', умноженные на окно Хэмминга w(n) = 0,54 - 0,46 cos(2 pi (n-1)/(N-1))' ); ненулевые: $cnum.\nЗадержка фильтра t0 = (n0 - 1) Dt = ${d0}Dt."
+text -300 -900 14 "Цифровой КИХ-фильтр Гильберта, $title (N = $((L + 1)), n0 = $n0), по образцу MicroCap ex5. $head1\nКоэффициенты h(n) = 2/(pi (n - n0)) при нечётном n - n0$( [ $win = 1 ] && echo ', умноженные на окно Хэмминга w(n) = 0,54 - 0,46 cos(2 pi (n-1)/(N-1))' ); ненулевые: $cnum.\nЗадержка фильтра t0 = (n0 - 1) Dt = ${d0}Dt$( [ $div -ne 1 ] && echo " = $t0N нс" )."
 text -300 -110 14 "ЛИНИЯ ЗАДЕРЖКИ: X1...X$d0 - блоки VDelay (библиотека Ideal), Tdel = 2Dt; узлы x0, x2, ..., x$L = s(t - k Dt)."
 text -300 $((ROW - 60)) 14 "УСИЛИТЕЛИ K0...K$((nt - 1)):\nИНУН без задержки, K = c0...c$((nt - 1))\n(нулевые коэффициенты пропущены)"
 text -300 $((ROW + 120)) 14 "СУММАТОРЫ (VSum, Ideal):\nгруппа 1 - отводы 0...$((n1 - 1)), группа 2 - отводы $n1...$((nt - 1)),\nитоговый Asum -> y = s^(t)"
