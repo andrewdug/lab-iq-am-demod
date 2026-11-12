@@ -3,8 +3,8 @@
 #   delay line of 2Dt blocks (Ideal/VDelay), coefficient gains on the taps (VCVS, T = 0),
 #   two group adders (like X4, X12 in ex5; Ideal/VSum chains) and a final adder (like X7),
 #   alignment delay X1 = t0 = (n0 - 1) Dt of the source signal (not part of the filter).
-# Usage: gen_hilbert_single.sh <AC|TR> <R10|W10|W18> <out.sch> [DIV]
-#   R10 - order 10, rectangular window; W10 - order 10, Hamming; W18 - order 18, Hamming.
+# Usage: gen_hilbert_single.sh <AC|TR> <R10|W10|W14|W18> <out.sch> [DIV]
+#   R10 - order 10, rectangular window; W10 - order 10, Hamming; W14 - order 14, Hamming; W18 - order 18, Hamming.
 #   DIV - undersampling (bandpass sampling) divisor, odd: fs = 4 f0 / DIV (default 1: fs = 4 f0).
 #         The carrier aliases to +fs/4 for DIV = 4k+1 and to -fs/4 for DIV = 4k+3 (inverted spectrum:
 #         the coefficients change sign so that z = s' + j s^ stays the analytic signal).
@@ -17,8 +17,9 @@ inv=0; [ $((div % 4)) -eq 3 ] && inv=1
 case $filt in
   R10) L=10; win=0; title="порядок 10, без окна (прямоугольное окно)";;
   W10) L=10; win=1; title="порядок 10, окно Хэмминга";;
+  W14) L=14; win=1; title="порядок 14, окно Хэмминга";;
   W18) L=18; win=1; title="порядок 18, окно Хэмминга";;
-  *) echo "filter must be R10, W10 or W18" >&2; exit 1;;
+  *) echo "filter must be R10, W10, W14 or W18" >&2; exit 1;;
 esac
 nt=$((L / 2 + 1)); n0=$((L / 2 + 1)); d0=$((L / 2)); n1=$(((nt + 1) / 2))
 
