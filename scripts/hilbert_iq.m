@@ -23,8 +23,8 @@ f0      = (400 + 30 * N) * 1e6;     % несущая, Гц
 Fm      = 3 * N * 1e6;              % частота модуляции, Гц
 U0      = 1;                        % амплитуда несущей, В
 m       = 1;                        % коэффициент модуляции
-usDiv   = 43;                        % субдискретизация: fs = 4 f0 / usDiv (1 - без неё; 43 - схема
-                                    % LR2k5_N1_hilbert_W18_D43_TR.sch, fs = 40 МГц)
+usDiv   = 1;                        % субдискретизация: fs = 4 f0 / usDiv (1 - без неё; 43 - схемы
+                                    % LR2k5_N1_hilbert_{R10,W10,W18}_D43_TR.sch, fs = 40 МГц)
 fs      = 4 * f0 / usDiv;           % частота дискретизации (f0 = fs/4 или её образ)
 Dt      = 1 / fs;
 fa      = f0 - round(f0 / fs) * fs; % где несущая оказывается после дискретизации: +fs/4 или -fs/4
@@ -32,9 +32,7 @@ tAn     = [1e-6, 2e-6];             % окно спектрального ана
 tSkip   = max(0.05e-6, 20 * Dt);    % отбросить заполнение линии задержки, с
 outName = 'hilbert_iq';             % префикс PNG и CSV
 if usDiv ~= 1
-    datFiles = {sprintf('LR2k5_N1_hilbert_W18_D%d_TR.dat', usDiv)};
-    datNames = {sprintf('порядок 18, окно Хэмминга, fs = %.4g МГц', fs / 1e6)};
-    datOrder = 18;
+    datFiles = strrep(datFiles, '_TR.dat', sprintf('_D%d_TR.dat', usDiv));
     outName  = sprintf('hilbert_iq_D%d', usDiv);
 end
 
@@ -50,10 +48,8 @@ csvName   = 'порядок 18, окно Хэмминга';   % подпись �
 switch inputMode
     case 'dat'
         [ds, variants] = readFilterSet(datFiles, datNames, datOrder);
-        iMain = numel(variants);    % для графиков - последний найденный (итоговый фильтр порядка 18)
     case 'csv'
         variants = struct('name', csvName, 'ref', 'sd', 'out', 'sh', 'order', csvOrder);
-        iMain = 1;
         ds = readCsvSet(findInput(csvS), findInput(csvSd), findInput(csvSh));
     otherwise
         error('inputMode должен быть ''dat'' или ''csv''.');
@@ -71,8 +67,7 @@ fAn  = (-numel(iAn) / 2 : numel(iAn) / 2 - 1).' * fs / numel(iAn);
 sn   = interp1(t, s, tn, 'spline');
 Hs   = idealHilbert(t, s);                % эталон H{s}(t) для измерения задержки
 
-res = repmat(struct('name', '', 't0', 0, 't0Meas', 0, 'K', 0, 'dPhi', 0, ...
-                    'imgZ', 0, 'imgIQ', 0, 'errU', 0), 1, numel(variants));
+R = struct([]);                           % результаты и сигналы всех фильтров
 for v = 1 : numel(variants)
     V  = variants(v);
     t0 = V.order / 2 * Dt;                % теория: (n0 - 1) Dt
@@ -92,28 +87,34 @@ for v = 1 : numel(variants)
     Sz  = spectrum(z(iAn));
     Siq = spectrum(I(iAn) + 1i * Q(iAn));
     ok  = tn >= tSkip;
-    res(v) = struct('name', V.name, 't0', t0, 't0Meas', t0Meas, 'K', K, ...
+    r = struct('V', V, 'name', V.name, 't0', t0, 't0Meas', t0Meas, 'K', K, ...
         'dPhi', phaseAt(sh(iAn), sd(iAn), tn(iAn), f0), ...
         'imgZ', db(at(Sz, fAn, -fa) / at(Sz, fAn, fa)), ...
         'imgIQ', db(at(Siq, fAn, -fs / 2) / at(Siq, fAn, 0)), ...
-        'errU', rms(U(ok) - Uenv(ok)) / rms(Uenv(ok)) * 100);
-
-    if v == iMain
-        M = struct('V', V, 't0', t0, 'sd', sd, 'sh', sh, 'z', z, 'I', I, 'Q', Q, 'U', U, 'Uenv', Uenv);
+        'errU', rms(U(ok) - Uenv(ok)) / rms(Uenv(ok)) * 100, ...
+        'sd', sd, 'sh', sh, 'z', z, 'I', I, 'Q', Q, 'U', U, 'Uenv', Uenv);
+    if isempty(R)
+        R = r;
+    else
+        R(v) = r;
     end
 end
+M = R(end);                                  % итоговый фильтр (обычно порядок 18)
 
 %% Результаты
 fprintf('fs = %.4g МГц, Dt = %.4f нс, w0*Dt = %.1f град, несущая после дискретизации %+.4g МГц\n', ...
     fs / 1e6, Dt * 1e9, mod(360 * f0 * Dt, 360), fa / 1e6);
 fprintf('%-28s %8s %8s %8s %9s %9s %9s %8s\n', 'Фильтр', 't0 теор', 't0 изм', '|K|', 'фаза,°', 'z(-f0),дБ', 'I/Q обр.', 'СКО U');
-for v = 1 : numel(res)
-    r = res(v);
+for v = 1 : numel(R)
+    r = R(v);
     fprintf('%-28s %6.3f нс %6.3f нс %8.4f %9.2f %9.1f %9.1f %6.2f %%\n', r.name, r.t0 * 1e9, ...
         r.t0Meas * 1e9, r.K, r.dPhi, r.imgZ, r.imgIQ, r.errU);
 end
 
-%% Графики для итогового фильтра
+%% Сравнение всех фильтров на одной странице
+plotCompare(R, sn, tn, iAn, fAn, fa, fs, tAn, tSkip, outName);
+
+%% Подробные графики для итогового фильтра
 % plotSignals(t, ds, M, tn, Dt, outName);
 plotHodograph(M, tn, tAn, sprintf('f_д = %.4g МГц: фаза меняется на %+d° за отсчёт', fs / 1e6, ...
     round(mod(360 * f0 * Dt + 180, 360) - 180)), outName);
@@ -125,10 +126,18 @@ fid = fopen([outName '.csv'], 'w');
 if fid < 0
     error('Не удалось создать файл %s.csv', outName);
 end
-fprintf(fid, 't;s;s_d;s_h;I;Q;U;Uenv\n');
-fprintf(fid, '%.6e;%.6e;%.6e;%.6e;%.6e;%.6e;%.6e;%.6e\n', [tn, sn, M.sd, M.sh, M.I, M.Q, M.U, M.Uenv].');
+% столбцы: t; s; затем для каждого фильтра k = 1, 2, ...: s_d, s_h, I, Q, U, Uenv
+hdr = {'t', 's'};
+dat = [tn, sn];
+for v = 1 : numel(R)
+    hdr = [hdr, strcat({'s_d', 's_h', 'I', 'Q', 'U', 'Uenv'}, sprintf('_%d', v))]; %#ok<AGROW>
+    dat = [dat, R(v).sd, R(v).sh, R(v).I, R(v).Q, R(v).U, R(v).Uenv];         %#ok<AGROW>
+    fprintf('  столбцы *_%d в CSV - %s\n', v, R(v).name);
+end
+fprintf(fid, '%s\n', strjoin(hdr, ';'));
+fprintf(fid, [strjoin(repmat({'%.6e'}, 1, size(dat, 2)), ';') '\n'], dat.');
 fclose(fid);
-fprintf('Сохранено: %s_*.png, %s.csv (%s)\n', outName, outName, M.V.name);
+fprintf('Сохранено: %s_compare.png (все фильтры), %s_*.png (%s), %s.csv\n', outName, outName, M.V.name, outName);
 
 %% ---------- обработка ----------
 function Hs = idealHilbert(t, s)
@@ -207,6 +216,83 @@ end
 %     grid on; xlabel('t, мкс'); ylabel('U, В'); title('Входной АМ-сигнал s(t): f_0 = 430 МГц, F_м = 3 МГц, m = 1');
 %     saveas(fig, [outName '_signals.png']);
 % end
+
+function plotCompare(R, sn, tn, iAn, fAn, fa, fs, tAn, tSkip, outName)
+    % Одна страница: столбец на фильтр; строки - годограф z(n), спектр z(n), I(n) и Q(n), U(n);
+    % внизу - ошибка демодуляции U(n) - Uenv(n) всех фильтров на общем графике.
+    nV  = numel(R);
+    fig = figure('Name', 'Сравнение фильтров Гильберта', 'Position', [40 40 520 * nV + 200 1250], 'Color', 'w');
+    kn  = tn >= tAn(1) & tn < tAn(2);
+    a   = linspace(0, 2 * pi, 361);
+    cols = lines(max(nV, 1));
+    Ss  = spectrum(sn(iAn));
+    lim = [0, 0];                            % общий масштаб I/Q для сравнения
+    for v = 1 : nV
+        lim = [min(lim(1), min([R(v).I; R(v).Q])), max(lim(2), max([R(v).I; R(v).Q]))];
+    end
+    for v = 1 : nV
+        r = R(v);
+        % 1. годограф
+        subplot(5, nV, v);
+        plot(real(r.z(kn)), imag(r.z(kn)), '.', 'Color', cols(v, :), 'MarkerSize', 5); hold on;
+        plot(2 * cos(a), 2 * sin(a), 'k:');
+        axis equal; grid on; xlim([-2.3 2.3]); ylim([-2.3 2.3]);
+        xlabel('s''(n), В'); ylabel('ŝ(n), В');
+        title({r.name, sprintf('|K(f_0)| = %.4f, \\Delta\\phi = %.1f°, t_0 = %.3f нс', r.K, r.dPhi, r.t0Meas * 1e9)});
+        % 2. спектр аналитического сигнала (серым - спектр s(n))
+        subplot(5, nV, nV + v);
+        Sz  = spectrum(r.z(iAn));
+        ref = max(Sz);
+        stem(fAn / 1e6, db(Ss / ref), 'BaseValue', -100, 'Marker', 'none', 'Color', [.75 .75 .75]); hold on;
+        stem(fAn / 1e6, db(Sz / ref), 'BaseValue', -100, 'Marker', 'none', 'Color', cols(v, :));
+        grid on; ylim([-100 5]); xlim([-1.1 1.1] * fs / 2e6);
+        xlabel('f, МГц'); ylabel('дБ');
+        title(sprintf('Спектр z(n): зеркальная (%+.4g МГц) подавлена на %.1f дБ', -fa / 1e6, -r.imgZ));
+        if v == 1
+            legend('s(n)', 'z(n)', 'Location', 'southwest');
+        end
+        % 3. НЧ квадратуры
+        subplot(5, nV, 2 * nV + v);
+        plot(tn * 1e6, r.I, 'r', tn * 1e6, r.Q, 'b');
+        grid on; xlim([0 tn(end) * 1e6]); ylim(lim + [-0.1 0.1]);
+        xlabel('t, мкс'); ylabel('U, В');
+        title(sprintf('I(n), Q(n): max|Q| = %.2g В, образ на f_д/2: %.1f дБ', max(abs(r.Q(iAn))), r.imgIQ));
+        if v == 1
+            legend('I(n)', 'Q(n)', 'Location', 'southwest');
+        end
+        % 4. демодуляция
+        subplot(5, nV, 3 * nV + v);
+        plot(tn * 1e6, r.Uenv, 'k--', 'LineWidth', 1.1); hold on;
+        plot(tn * 1e6, r.U, 'Color', cols(v, :));
+        grid on; xlim([0 tn(end) * 1e6]); ylim([0 2.4]);
+        xlabel('t, мкс'); ylabel('U, В');
+        title(sprintf('U(n) = sqrt(I^2 + Q^2): СКО от модулирующего %.2f %%', r.errU));
+        if v == 1
+            legend('модулирующее', 'U(n)', 'Location', 'southwest');
+        end
+    end
+    % 5. ошибка демодуляции всех фильтров на одном графике
+    subplot(5, 1, 5);
+    names = cell(1, nV);
+    ok = tn >= tSkip;
+    eMax = 0;
+    for v = 1 : nV
+        e = R(v).U - R(v).Uenv;
+        plot(tn * 1e6, e, 'Color', cols(v, :)); hold on;
+        eMax = max(eMax, max(abs(e(ok))));
+        names{v} = sprintf('%s: СКО %.2f %%', R(v).name, R(v).errU);
+    end
+    yl = 1.15 * eMax * [-1 1];               % масштаб по установившемуся режиму
+    plot(tSkip * 1e6 * [1 1], yl, 'k:');
+    grid on; xlim([0 tn(end) * 1e6]); ylim(yl);
+    xlabel('t, мкс'); ylabel('U - U_{мод}, В');
+    title('Сравнение: ошибка демодуляции U(n) - U_0(1 + m sin 2\piF_м(t - t_0))');
+    legend([names, {'заполнение линии задержки'}], 'Location', 'eastoutside');
+    if exist('sgtitle', 'file') || exist('sgtitle', 'builtin')
+        sgtitle(sprintf('Сравнение фильтров Гильберта, f_д = %.4g МГц', fs / 1e6), 'FontWeight', 'bold');
+    end
+    saveas(fig, [outName '_compare.png']);
+end
 
 function plotHodograph(M, tn, tAn, subtitle, outName)
     fig = newFig('Годограф z(n)');
