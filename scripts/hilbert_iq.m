@@ -31,6 +31,9 @@ fa      = f0 - round(f0 / fs) * fs; % где несущая оказываетс
 tAn     = [1e-6, 2e-6];             % окно спектрального анализа: 3 периода Fм (шаг ДПФ 1 МГц)
 tSkip   = max(0.05e-6, 20 * Dt);    % отбросить заполнение линии задержки, с
 outName = 'hilbert_iq';             % префикс PNG и CSV
+ordList = 6 : 4 : 30;              % порядки для сравнения (цифровая модель фильтра, без Qucs);
+                                    % L/2 нечётное, как у 10 и 18: при чётном L/2 крайние отводы нулевые
+afcOrd  = [6 10 18 30];             % порядки, для которых рисуются АЧХ
 if usDiv ~= 1
     datFiles = strrep(datFiles, '_TR.dat', sprintf('_D%d_TR.dat', usDiv));
     outName  = sprintf('hilbert_iq_D%d', usDiv);
@@ -119,6 +122,40 @@ plotSpectra(sn(iAn), R, iAn, fAn, fa, fs, outName);
 plotIQ(R, tn, iAn, fAn, Fm, outName);
 plotDemod(R, tn, tSkip, outName);
 
+%% Сравнение порядков фильтра: цифровая модель с теми же коэффициентами, что в схемах Qucs
+% h(k) = 2/(pi k) при нечётном k = n - n0 (k = -L/2 ... L/2), с окном Хэмминга
+% w = 0,54 - 0,46 cos(2 pi (k + L/2) / L); при спектре, инвертированном субдискретизацией, знак меняется.
+% На вход подаются те же отсчёты s(n), что и в Qucs, поэтому для порядков 10 и 18 модель
+% должна совпасть с результатами схем (они отмечены на графиках).
+sgnH = sign(fa);
+O = struct('L', {}, 'win', {}, 'K', {}, 'imgZ', {}, 'errU', {});
+for win = [0 1]
+    for L = ordList
+        [k, h] = hilbertCoef(L, win, sgnH);
+        sh = filter(h, 1, sn);                          % s^(n), задержан на L/2 отсчётов
+        sd = [zeros(L / 2, 1); sn(1 : end - L / 2)];    % s'(n) = s(n - L/2)
+        z  = sd + 1i * sh;
+        w0t = 2 * pi * f0 * tn;
+        I  = sd .* cos(w0t) + sh .* sin(w0t);
+        Q  = -sd .* sin(w0t) + sh .* cos(w0t);
+        U  = sqrt(I.^2 + Q.^2);
+        Uenv = U0 * (1 + m * sin(2 * pi * Fm * (tn - L / 2 * Dt)));
+        ok = tn >= max(tSkip, (L + 1) * Dt);
+        Sz = spectrum(z(iAn));
+        O(end + 1) = struct('L', L, 'win', win, ...
+            'K', abs(sum(h .* exp(-2i * pi * fa * k * Dt))), ...   % |K| на частоте несущей
+            'imgZ', db(at(Sz, fAn, -fa) / at(Sz, fAn, fa)), ...
+            'errU', rms(U(ok) - Uenv(ok)) / rms(Uenv(ok)) * 100); %#ok<SAGROW>
+    end
+end
+fprintf('\nСравнение порядков (цифровая модель):\n%-8s %-14s %9s %11s %8s\n', 'порядок', 'окно', '|K(f0)|', 'z(-f0), дБ', 'СКО U');
+for j = 1 : numel(O)
+    o = O(j);
+    fprintf('%-8d %-14s %9.4f %11.1f %6.2f %%\n', o.L, winName(o.win), o.K, o.imgZ, o.errU);
+end
+plotOrderAFC(afcOrd, sgnH, fs, fa, Fm, outName);
+plotOrderMetrics(O, R, outName);
+
 fid = fopen([outName '.csv'], 'w');
 if fid < 0
     error('Не удалось создать файл %s.csv', outName);
@@ -134,7 +171,7 @@ end
 fprintf(fid, '%s\n', strjoin(hdr, ';'));
 fprintf(fid, [strjoin(repmat({'%.6e'}, 1, size(dat, 2)), ';') '\n'], dat.');
 fclose(fid);
-fprintf('Сохранено: %s_{hodograph,spectra,iq,demod}.png, %s.csv\n', outName, outName);
+fprintf('Сохранено: %s_{hodograph,spectra,iq,demod,orders,orders_afc}.png, %s.csv\n', outName, outName);
 
 %% ---------- обработка ----------
 function Hs = idealHilbert(t, s)
@@ -187,6 +224,25 @@ function dphi = phaseAt(a, b, tn, f)
     % разность фаз a и b на частоте f, град
     e = exp(-2i * pi * f * tn);
     dphi = angle(sum(a .* e) / sum(b .* e)) * 180 / pi;
+end
+
+function [k, h] = hilbertCoef(L, win, sgn)
+    % коэффициенты КИХ-фильтра Гильберта порядка L (L + 1 отвод), k = -L/2 ... L/2
+    k = (-L / 2 : L / 2).';
+    h = zeros(size(k));
+    odd = mod(k, 2) ~= 0;
+    h(odd) = sgn * 2 ./ (pi * k(odd));
+    if win
+        h = h .* (0.54 - 0.46 * cos(2 * pi * (k + L / 2) / L));
+    end
+end
+
+function s = winName(win)
+    if win
+        s = 'Хэмминг';
+    else
+        s = 'без окна';
+    end
 end
 
 %% ---------- графики ----------
@@ -322,6 +378,74 @@ function plotDemod(R, tn, tSkip, outName)
     title('Ошибка демодуляции U(n) - U_0(1 + m sin 2\piF_м(t - t_0)) всех фильтров');
     legend([names, {'заполнение'}], 'Location', 'eastoutside');
     saveas(fig, [outName '_demod.png']);
+end
+
+function plotOrderAFC(ords, sgn, fs, fa, Fm, outName)
+    % АЧХ фильтра Гильберта |K(f)| для разных порядков: без окна и с окном Хэмминга
+    fig = figure('Name', 'АЧХ для разных порядков', 'Position', [100 80 1000 700], 'Color', 'w');
+    f   = linspace(0, fs / 2, 2001).';
+    c   = filtColors(numel(ords));
+    for win = [0 1]
+        subplot(2, 1, win + 1);
+        names = cell(1, numel(ords));
+        for i = 1 : numel(ords)
+            [k, h] = hilbertCoef(ords(i), win, sgn);
+            K = abs(exp(-2i * pi * f * k.' / fs) * h);
+            plot(f / 1e6, K, 'Color', c(i, :), 'LineWidth', 1.2); hold on;
+            names{i} = sprintf('порядок %d', ords(i));
+        end
+        yl = [0 1.25];
+        plot(abs(fa) / 1e6 * [1 1], yl, 'k--');
+        plot((abs(fa) + Fm * [-1 1]) / 1e6, [1 1], 'k', 'LineWidth', 3);
+        grid on; ylim(yl); xlim([0 fs / 2e6]);
+        xlabel('f, МГц'); ylabel('|K(f)|');
+        title(sprintf('АЧХ фильтра Гильберта, %s (f_д = %.4g МГц)', winName(win), fs / 1e6));
+        legend([names, {'несущая', 'полоса АМ-сигнала'}], 'Location', 'eastoutside');
+    end
+    saveas(fig, [outName '_orders_afc.png']);
+end
+
+function plotOrderMetrics(O, R, outName)
+    % показатели качества в зависимости от порядка; квадраты - результаты схем Qucs-S
+    fig = figure('Name', 'Сравнение порядков', 'Position', [100 80 1000 800], 'Color', 'w');
+    mk  = {'o-', 's-'};
+    cl  = [0 .45 .74; .85 .33 .10];
+    qW  = arrayfun(@(r) double(~isempty(strfind(r.name, 'Хэмминг'))), R);
+    qL  = arrayfun(@(r) r.V.order, R);
+    fld = {'imgZ', 'errU', 'K'};
+    ttl = {'Подавление зеркальной составляющей z(n)', 'СКО огибающей U(n) от модулирующего', ...
+           'Отклонение |K(f_0)| от 1'};
+    yl  = {'подавление, дБ', 'СКО, %', '||K(f_0)| - 1|, %'};
+    for j = 1 : 3
+        subplot(3, 1, j);
+        for win = [0 1]
+            o = O([O.win] == win);
+            y = [o.(fld{j})];
+            q = [R(qW == win).(fld{j})];
+            switch fld{j}
+                case 'imgZ', y = -y;              q = -q;
+                case 'K',    y = abs(y - 1) * 100; q = abs(q - 1) * 100;
+            end
+            if j == 1
+                plot([o.L], y, mk{win + 1}, 'Color', cl(win + 1, :), 'LineWidth', 1.2); hold on;
+            else
+                semilogy([o.L], y, mk{win + 1}, 'Color', cl(win + 1, :), 'LineWidth', 1.2); hold on;
+            end
+            if ~isempty(q)
+                plot(qL(qW == win), q, 'kp', 'MarkerSize', 12, 'MarkerFaceColor', cl(win + 1, :));
+            end
+        end
+        grid on; xlim([min([O.L]) - 2, max([O.L]) + 2]); xticks(unique([O.L]));
+        ylabel(yl{j}); title(ttl{j});
+        if j == 1
+            legend('без окна (модель)', 'без окна (Qucs-S)', 'Хэмминг (модель)', 'Хэмминг (Qucs-S)', ...
+                   'Location', 'eastoutside');
+        else
+            legend('без окна', 'Qucs-S', 'Хэмминг', 'Qucs-S', 'Location', 'eastoutside');
+        end
+    end
+    xlabel('порядок фильтра L');
+    saveas(fig, [outName '_orders.png']);
 end
 
 function addSuperTitle(txt)
